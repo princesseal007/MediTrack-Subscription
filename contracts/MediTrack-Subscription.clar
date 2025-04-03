@@ -193,3 +193,185 @@
             can-access: true
         }))
 )
+
+
+(define-constant ERR-INVALID-UPGRADE (err u105))
+
+(define-read-only (is-valid-tier (tier (string-ascii 20)))
+    (or
+        (is-eq tier "basic")
+        (is-eq tier "specialist")
+        (is-eq tier PREMIUM-TIER)
+    )
+)
+
+(define-public (change-subscription-tier (new-tier (string-ascii 20)))
+    (let (
+        (current-sub (unwrap! (map-get? subscriptions tx-sender) ERR-NOT-AUTHORIZED))
+        (current-block stacks-block-height)
+    )
+        (if (is-valid-tier new-tier)
+            (begin
+                (map-set subscriptions tx-sender
+                    (merge current-sub { tier: new-tier })
+                )
+                (ok true)
+            )
+            ERR-INVALID-TIER
+        )
+    )
+)
+
+
+(define-map usage-tiers
+    principal
+    {monthly-access: uint, tier-multiplier: uint})
+
+(define-constant TIER1-THRESHOLD u100)
+(define-constant TIER2-THRESHOLD u500)
+
+(define-public (calculate-usage-tier)
+    (let ((usage (default-to 
+        {access-count: u0, last-access: u0, total-patients: u0}
+        (map-get? subscription-analytics tx-sender))))
+        (map-set usage-tiers tx-sender
+            {
+                monthly-access: (get access-count usage),
+                tier-multiplier: (if (> (get access-count usage) TIER2-THRESHOLD)
+                    u2
+                    (if (> (get access-count usage) TIER1-THRESHOLD)
+                        u15
+                        u1))
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-map auto-renewal
+    principal
+    {enabled: bool, last-renewal: uint})
+
+(define-public (toggle-auto-renewal)
+    (let ((current-status (default-to 
+        {enabled: false, last-renewal: u0}
+        (map-get? auto-renewal tx-sender))))
+        (map-set auto-renewal tx-sender
+            {
+                enabled: (not (get enabled current-status)),
+                last-renewal: stacks-block-height
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-constant ERR-TRANSFER-FAILED (err u106))
+
+(define-public (transfer-subscription (new-owner principal))
+    (let ((current-sub (unwrap! (map-get? subscriptions tx-sender) ERR-NOT-AUTHORIZED)))
+        (begin
+            (map-delete subscriptions tx-sender)
+            (map-set subscriptions new-owner current-sub)
+            (ok true)
+        )
+    )
+)
+
+
+
+(define-map subscription-bundles
+    (string-ascii 20)
+    {
+        name: (string-ascii 20),
+        duration: uint,
+        discount: uint,
+        features: (list 5 (string-ascii 20))
+    }
+)
+
+(define-public (create-bundle-subscription (bundle-name (string-ascii 20)))
+    (let ((bundle (unwrap! (map-get? subscription-bundles bundle-name) ERR-INVALID-TIER)))
+        (map-set subscriptions tx-sender
+            {
+                tier: (get name bundle),
+                expiration: (+ stacks-block-height (get duration bundle)),
+                emergency-access: false
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-map loyalty-points
+    principal
+    {
+        points: uint,
+        level: (string-ascii 10),
+        rewards-claimed: uint
+    }
+)
+
+(define-public (accumulate-points)
+    (let ((current-points (default-to 
+        {points: u0, level: "bronze", rewards-claimed: u0}
+        (map-get? loyalty-points tx-sender))))
+        (map-set loyalty-points tx-sender
+            (merge current-points 
+                {points: (+ (get points current-points) u10)}
+            )
+        )
+        (ok true)
+    )
+)
+
+
+(define-map seasonal-promotions
+    uint
+    {
+        name: (string-ascii 20),
+        discount: uint,
+        start-block: uint,
+        end-block: uint
+    }
+)
+
+(define-public (apply-seasonal-promotion (promotion-id uint))
+    (let ((promotion (unwrap! (map-get? seasonal-promotions promotion-id) ERR-INVALID-TIER)))
+        (if (and 
+            (>= stacks-block-height (get start-block promotion))
+            (<= stacks-block-height (get end-block promotion)))
+            (ok true)
+            (err u107)
+        )
+    )
+)
+
+
+(define-map usage-reports
+    principal
+    {
+        daily-accesses: uint,
+        peak-usage-time: uint,
+        feature-usage: (list 5 (string-ascii 20))
+    }
+)
+
+(define-public (generate-usage-report)
+    (let ((current-usage (default-to 
+        {daily-accesses: u0, peak-usage-time: u0, feature-usage: (list)}
+        (map-get? usage-reports tx-sender))))
+        (map-set usage-reports tx-sender
+            (merge current-usage 
+                {
+                    daily-accesses: (+ (get daily-accesses current-usage) u1),
+                    peak-usage-time: stacks-block-height
+                }
+            )
+        )
+        (ok true)
+    )
+)
