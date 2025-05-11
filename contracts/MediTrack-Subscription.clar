@@ -375,3 +375,102 @@
         (ok true)
     )
 )
+
+
+(define-map referral-system
+    principal
+    {
+        referrer: (optional principal),
+        referral-count: uint,
+        rewards-earned: uint
+    }
+)
+
+(define-constant REFERRAL-REWARD u100)
+(define-constant MAX-REFERRAL-REWARD u1000)
+
+(define-public (register-referral (referrer principal))
+    (let ((current-stats (default-to 
+            {referrer: none, referral-count: u0, rewards-earned: u0}
+            (map-get? referral-system referrer))))
+        (begin
+            (map-set referral-system tx-sender
+                {
+                    referrer: (some referrer),
+                    referral-count: u0,
+                    rewards-earned: u0
+                }
+            )
+            (map-set referral-system referrer
+                (merge current-stats 
+                    {
+                        referral-count: (+ (get referral-count current-stats) u1),
+                        rewards-earned: (+ (get rewards-earned current-stats) REFERRAL-REWARD)
+                    }
+                )
+            )
+            (ok true)
+        )
+    )
+)
+(define-public (claim-referral-reward)
+    (let ((current-stats (unwrap! (map-get? referral-system tx-sender) ERR-NOT-AUTHORIZED)))
+        (if (< (get rewards-earned current-stats) MAX-REFERRAL-REWARD)
+            (begin
+                (map-set referral-system tx-sender
+                    (merge current-stats 
+                        { rewards-earned: (+ (get rewards-earned current-stats) REFERRAL-REWARD) }
+                    )
+                )
+                (ok true)
+            )
+            ERR-INVALID-TIER
+        )
+    )
+)
+
+(define-map subscription-metrics
+    principal
+    {
+        total-sessions: uint,
+        average-session-length: uint,
+        peak-usage-blocks: (list 10 uint),
+        feature-usage-count: {
+            records-accessed: uint,
+            emergency-calls: uint,
+            data-exports: uint
+        }
+    }
+)
+
+(define-public (record-session-metrics (session-length uint) (feature-type (string-ascii 20)))
+    (let ((current-metrics (default-to 
+            {
+                total-sessions: u0,
+                average-session-length: u0,
+                peak-usage-blocks: (list),
+                feature-usage-count: {
+                    records-accessed: u0,
+                    emergency-calls: u0,
+                    data-exports: u0
+                }
+            }
+            (map-get? subscription-metrics tx-sender))))
+        (map-set subscription-metrics tx-sender
+            (merge current-metrics 
+                {
+                    total-sessions: (+ (get total-sessions current-metrics) u1),
+                    average-session-length: (/ (+ 
+                        (* (get average-session-length current-metrics) (get total-sessions current-metrics))
+                        session-length
+                    ) (+ (get total-sessions current-metrics) u1)),
+                    peak-usage-blocks: (unwrap-panic (as-max-len? 
+                        (append (get peak-usage-blocks current-metrics) stacks-block-height)
+                        u10
+                    ))
+                }
+            )
+        )
+        (ok true)
+    )
+)
