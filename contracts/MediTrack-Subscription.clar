@@ -474,3 +474,202 @@
         (ok true)
     )
 )
+
+
+(define-constant ERR-NOT-OWNER (err u200))
+(define-constant ERR-ALREADY-SIGNED (err u201))
+(define-constant ERR-INSUFFICIENT-SIGNATURES (err u202))
+(define-constant ERR-PROPOSAL-NOT-FOUND (err u203))
+(define-constant ERR-PROPOSAL-EXPIRED (err u204))
+(define-constant ERR-INVALID-SIGNER (err u205))
+
+(define-data-var proposal-nonce uint u0)
+
+(define-map multisig-wallets
+    principal
+    {
+        signers: (list 10 principal),
+        required-signatures: uint,
+        subscription-tier: (string-ascii 20),
+        is-active: bool
+    }
+)
+
+(define-map subscription-proposals
+    uint
+    {
+        wallet: principal,
+        action: (string-ascii 20),
+        new-tier: (optional (string-ascii 20)),
+        signatures: (list 10 principal),
+        expiration: uint,
+        executed: bool
+    }
+)
+
+(define-map signer-permissions
+    {wallet: principal, signer: principal}
+    {can-propose: bool, can-sign: bool}
+)
+
+
+
+(define-private (setup-signer-permissions (signer principal) (wallet principal))
+    (begin
+        (map-set signer-permissions {wallet: wallet, signer: signer}
+            {can-propose: true, can-sign: true}
+        )
+        wallet
+    )
+)
+
+(define-public (propose-subscription-action (wallet principal) (action (string-ascii 20)) (new-tier (optional (string-ascii 20))))
+    (let (
+        (wallet-info (unwrap! (map-get? multisig-wallets wallet) ERR-NOT-OWNER))
+        (proposal-id (var-get proposal-nonce))
+        (signer-perms (unwrap! (map-get? signer-permissions {wallet: wallet, signer: tx-sender}) ERR-INVALID-SIGNER))
+    )
+        (asserts! (get can-propose signer-perms) ERR-INVALID-SIGNER)
+        (map-set subscription-proposals proposal-id
+            {
+                wallet: wallet,
+                action: action,
+                new-tier: new-tier,
+                signatures: (list tx-sender),
+                expiration: (+ stacks-block-height u1440),
+                executed: false
+            }
+        )
+        (var-set proposal-nonce (+ proposal-id u1))
+        (ok proposal-id)
+    )
+)
+
+(define-public (sign-proposal (proposal-id uint))
+    (let (
+        (proposal (unwrap! (map-get? subscription-proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
+        (wallet-info (unwrap! (map-get? multisig-wallets (get wallet proposal)) ERR-NOT-OWNER))
+        (signer-perms (unwrap! (map-get? signer-permissions {wallet: (get wallet proposal), signer: tx-sender}) ERR-INVALID-SIGNER))
+    )
+        (asserts! (get can-sign signer-perms) ERR-INVALID-SIGNER)
+        (asserts! (< stacks-block-height (get expiration proposal)) ERR-PROPOSAL-EXPIRED)
+        (asserts! (not (get executed proposal)) ERR-PROPOSAL-EXPIRED)
+        (asserts! (is-none (index-of (get signatures proposal) tx-sender)) ERR-ALREADY-SIGNED)
+        
+        (map-set subscription-proposals proposal-id
+            (merge proposal 
+                {signatures: (unwrap-panic (as-max-len? (append (get signatures proposal) tx-sender) u10))}
+            )
+        )
+        (ok true)
+    )
+)
+
+(define-public (execute-proposal (proposal-id uint))
+    (let (
+        (proposal (unwrap! (map-get? subscription-proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
+        (wallet-info (unwrap! (map-get? multisig-wallets (get wallet proposal)) ERR-NOT-OWNER))
+        (signature-count (len (get signatures proposal)))
+    )
+        (asserts! (>= signature-count (get required-signatures wallet-info)) ERR-INSUFFICIENT-SIGNATURES)
+        (asserts! (< stacks-block-height (get expiration proposal)) ERR-PROPOSAL-EXPIRED)
+        (asserts! (not (get executed proposal)) ERR-PROPOSAL-EXPIRED)
+        
+        (map-set subscription-proposals proposal-id
+            (merge proposal {executed: true})
+        )
+        
+        (if (is-eq (get action proposal) "change-tier")
+            (execute-tier-change (get wallet proposal) (unwrap-panic (get new-tier proposal)))
+            (if (is-eq (get action proposal) "cancel")
+                (execute-cancellation (get wallet proposal))
+                (if (is-eq (get action proposal) "renew")
+                    (execute-renewal (get wallet proposal))
+                    (ok true)
+                )
+            )
+        )
+    )
+)
+
+(define-private (execute-tier-change (wallet principal) (new-tier (string-ascii 20)))
+    (let ((wallet-info (unwrap-panic (map-get? multisig-wallets wallet))))
+        (map-set multisig-wallets wallet
+            (merge wallet-info {subscription-tier: new-tier})
+        )
+        (ok true)
+    )
+)
+
+(define-private (execute-cancellation (wallet principal))
+    (let ((wallet-info (unwrap-panic (map-get? multisig-wallets wallet))))
+        (map-set multisig-wallets wallet
+            (merge wallet-info {is-active: false})
+        )
+        (ok true)
+    )
+)
+
+(define-private (execute-renewal (wallet principal))
+    (let ((wallet-info (unwrap-panic (map-get? multisig-wallets wallet))))
+        (map-set multisig-wallets wallet
+            (merge wallet-info {is-active: true})
+        )
+        (ok true)
+    )
+)
+
+(define-public (add-signer (wallet principal) (new-signer principal))
+    (let (
+        (wallet-info (unwrap! (map-get? multisig-wallets wallet) ERR-NOT-OWNER))
+        (current-signers (get signers wallet-info))
+    )
+        (asserts! (is-some (index-of current-signers tx-sender)) ERR-INVALID-SIGNER)
+        (map-set multisig-wallets wallet
+            (merge wallet-info 
+                {signers: (unwrap-panic (as-max-len? (append current-signers new-signer) u10))}
+            )
+        )
+        (map-set signer-permissions {wallet: wallet, signer: new-signer}
+            {can-propose: true, can-sign: true}
+        )
+        (ok true)
+    )
+)
+
+
+(define-read-only (get-multisig-wallet (wallet principal))
+    (ok (map-get? multisig-wallets wallet))
+)
+
+(define-read-only (get-proposal (proposal-id uint))
+    (ok (map-get? subscription-proposals proposal-id))
+)
+
+(define-read-only (get-proposal-signature-count (proposal-id uint))
+    (match (map-get? subscription-proposals proposal-id)
+        proposal (ok (len (get signatures proposal)))
+        (ok u0)
+    )
+)
+
+(define-read-only (is-signer (wallet principal) (signer principal))
+    (match (map-get? multisig-wallets wallet)
+        wallet-info (ok (is-some (index-of (get signers wallet-info) signer)))
+        (ok false)
+    )
+)
+
+(define-read-only (can-execute-proposal (proposal-id uint))
+    (match (map-get? subscription-proposals proposal-id)
+        proposal (match (map-get? multisig-wallets (get wallet proposal))
+            wallet-info (ok (and
+                (>= (len (get signatures proposal)) (get required-signatures wallet-info))
+                (< stacks-block-height (get expiration proposal))
+                (not (get executed proposal))
+            ))
+            (ok false)
+        )
+        (ok false)
+    )
+)
