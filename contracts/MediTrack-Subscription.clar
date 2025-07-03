@@ -9,6 +9,35 @@
 ;; Subscription tiers
 (define-data-var basic-tier-price uint u1000)
 (define-data-var specialist-tier-price uint u2000)
+(define-constant ERR-BACKUP-NOT-FOUND (err u300))
+(define-constant ERR-BACKUP-EXPIRED (err u301))
+(define-constant ERR-UNAUTHORIZED-RECOVERY (err u302))
+(define-constant ERR-INVALID-BACKUP-HASH (err u303))
+
+(define-constant BACKUP-RETENTION-BLOCKS u52560)
+(define-data-var backup-nonce uint u0)
+
+(define-map subscription-backups
+    {owner: principal, backup-id: uint}
+    {
+        data-hash: (buff 32),
+        tier: (string-ascii 20),
+        expiration: uint,
+        emergency-access: bool,
+        creation-block: uint,
+        backup-expiry: uint,
+        verified: bool
+    }
+)
+
+(define-map backup-recovery-keys
+    principal
+    {
+        recovery-principal: (optional principal),
+        recovery-enabled: bool,
+        last-updated: uint
+    }
+)
 
 ;; Data maps
 (define-map subscriptions
@@ -590,6 +619,114 @@
             )
         )
     )
+)
+
+
+(define-public (create-subscription-backup (data-hash (buff 32)))
+    (let (
+        (current-sub (unwrap! (map-get? subscriptions tx-sender) ERR-NOT-AUTHORIZED))
+        (backup-id (var-get backup-nonce))
+    )
+        (map-set subscription-backups {owner: tx-sender, backup-id: backup-id}
+            {
+                data-hash: data-hash,
+                tier: (get tier current-sub),
+                expiration: (get expiration current-sub),
+                emergency-access: (get emergency-access current-sub),
+                creation-block: stacks-block-height,
+                backup-expiry: (+ stacks-block-height BACKUP-RETENTION-BLOCKS),
+                verified: true
+            }
+        )
+        (var-set backup-nonce (+ backup-id u1))
+        (ok backup-id)
+    )
+)
+
+(define-public (restore-from-backup (backup-id uint) (data-hash (buff 32)))
+    (let (
+        (backup (unwrap! (map-get? subscription-backups {owner: tx-sender, backup-id: backup-id}) ERR-BACKUP-NOT-FOUND))
+        (recovery-info (map-get? backup-recovery-keys tx-sender))
+    )
+        (asserts! (< stacks-block-height (get backup-expiry backup)) ERR-BACKUP-EXPIRED)
+        (asserts! (is-eq (get data-hash backup) data-hash) ERR-INVALID-BACKUP-HASH)
+        (asserts! (get verified backup) ERR-INVALID-BACKUP-HASH)
+        
+        (map-set subscriptions tx-sender
+            {
+                tier: (get tier backup),
+                expiration: (get expiration backup),
+                emergency-access: (get emergency-access backup)
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (setup-recovery-delegate (recovery-principal principal))
+    (ok (map-set backup-recovery-keys tx-sender
+        {
+            recovery-principal: (some recovery-principal),
+            recovery-enabled: true,
+            last-updated: stacks-block-height
+        }))
+)
+
+(define-public (delegate-recovery (original-owner principal) (backup-id uint) (data-hash (buff 32)))
+    (let (
+        (recovery-info (unwrap! (map-get? backup-recovery-keys original-owner) ERR-UNAUTHORIZED-RECOVERY))
+        (backup (unwrap! (map-get? subscription-backups {owner: original-owner, backup-id: backup-id}) ERR-BACKUP-NOT-FOUND))
+    )
+        (asserts! (get recovery-enabled recovery-info) ERR-UNAUTHORIZED-RECOVERY)
+        (asserts! (is-eq (some tx-sender) (get recovery-principal recovery-info)) ERR-UNAUTHORIZED-RECOVERY)
+        (asserts! (< stacks-block-height (get backup-expiry backup)) ERR-BACKUP-EXPIRED)
+        (asserts! (is-eq (get data-hash backup) data-hash) ERR-INVALID-BACKUP-HASH)
+        
+        (map-set subscriptions original-owner
+            {
+                tier: (get tier backup),
+                expiration: (get expiration backup),
+                emergency-access: (get emergency-access backup)
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (cleanup-expired-backups (backup-ids (list 20 uint)))
+    (ok (fold cleanup-single-backup backup-ids true))
+)
+
+(define-private (cleanup-single-backup (backup-id uint) (success bool))
+    (match (map-get? subscription-backups {owner: tx-sender, backup-id: backup-id})
+        backup (if (>= stacks-block-height (get backup-expiry backup))
+            (begin
+                (map-delete subscription-backups {owner: tx-sender, backup-id: backup-id})
+                success
+            )
+            success
+        )
+        success
+    )
+)
+
+(define-read-only (get-backup-info (owner principal) (backup-id uint))
+    (ok (map-get? subscription-backups {owner: owner, backup-id: backup-id}))
+)
+
+(define-read-only (verify-backup-integrity (owner principal) (backup-id uint) (expected-hash (buff 32)))
+    (match (map-get? subscription-backups {owner: owner, backup-id: backup-id})
+        backup (ok (and 
+            (is-eq (get data-hash backup) expected-hash)
+            (< stacks-block-height (get backup-expiry backup))
+            (get verified backup)
+        ))
+        (ok false)
+    )
+)
+
+(define-read-only (get-recovery-delegate (owner principal))
+    (ok (map-get? backup-recovery-keys owner))
 )
 
 (define-private (execute-tier-change (wallet principal) (new-tier (string-ascii 20)))
