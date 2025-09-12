@@ -52,11 +52,16 @@ plan:
         - emulated-contract-publish:
             contract-name: Healthcare-Compliance-Audit
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/Healthcare-Compliance-Audit.clar
+            path: "contracts\\Healthcare-Compliance-Audit.clar"
             clarity-version: 3
         - emulated-contract-publish:
             contract-name: MediTrack-Subscription
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
-            path: contracts/MediTrack-Subscription.clar
+            path: "contracts\\MediTrack-Subscription.clar"
+            clarity-version: 3
+        - emulated-contract-publish:
+            contract-name: compliance-reporter
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "contracts\\compliance-reporter.clar"
             clarity-version: 3
       epoch: "3.1"
